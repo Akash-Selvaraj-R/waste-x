@@ -6,13 +6,31 @@ interface PgLikeError {
   code?: string
   errno?: string
   syscall?: string
+  cause?: unknown
+  errors?: unknown[]
 }
 
-function codeOf(error: unknown): string | undefined {
-  if (typeof error === 'object' && error !== null) {
-    const candidate = error as PgLikeError
-    if (typeof candidate.code === 'string') return candidate.code
-    if (typeof candidate.errno === 'string') return candidate.errno
+/**
+ * Reads a driver error code from an error, unwrapping the chains real
+ * drivers produce: drizzle wraps query failures as `Error('Failed query: …')`
+ * with the pg error on `cause`, and Node surfaces multi-address connect
+ * failures as `AggregateError` with the per-address errors on `errors`.
+ * Bounded so a self-referencing cause can never loop.
+ */
+function codeOf(error: unknown, depth = 0): string | undefined {
+  if (typeof error !== 'object' || error === null || depth > 5) return undefined
+  const candidate = error as PgLikeError
+  if (typeof candidate.code === 'string' && candidate.code.length > 0) return candidate.code
+  if (typeof candidate.errno === 'string' && candidate.errno.length > 0) return candidate.errno
+  if (candidate.cause !== undefined && candidate.cause !== null) {
+    const nested = codeOf(candidate.cause, depth + 1)
+    if (nested) return nested
+  }
+  if (Array.isArray(candidate.errors)) {
+    for (const inner of candidate.errors) {
+      const nested = codeOf(inner, depth + 1)
+      if (nested) return nested
+    }
   }
   return undefined
 }

@@ -18,3 +18,5 @@ node_modules
 
 # Test / tooling artifacts
 coverage/
+logs/
+tsconfig.tsbuildinfo

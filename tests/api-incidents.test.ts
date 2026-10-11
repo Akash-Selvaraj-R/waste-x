@@ -14,7 +14,7 @@ const h = vi.hoisted(() => {
     rows: [] as Record<string, unknown>[],
     total: 0,
     getDbError: null as unknown,
-    insertErrors: [] as { code: string }[],
+    insertErrors: [] as unknown[],
     notConfigured: false,
     dbUp: true,
     inserted: [] as Record<string, unknown>[],
@@ -215,6 +215,26 @@ describe('POST /api/incidents', () => {
     expect(body.error.message).not.toContain('ECONNREFUSED')
   })
 
+  it('returns 503 when drizzle wraps the connection failure on `cause`', async () => {
+    // Real drizzle/node-postgres failures look like this: the pg error is
+    // only reachable through `cause`, never as a top-level `code`.
+    h.state.getDbError = Object.assign(new Error('Failed query: select …'), {
+      query: 'select …',
+      params: [],
+      cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), {
+        code: 'ECONNREFUSED',
+        errno: -4078,
+        syscall: 'connect',
+      }),
+    })
+    const response = await createIncidentRoute(post(validPayload))
+    expect(response.status).toBe(503)
+    const body = await response.json()
+    expect(body.error.code).toBe('DATABASE_UNAVAILABLE')
+    expect(body.error.message).not.toContain('ECONNREFUSED')
+    expect(body.error.message).not.toContain('Failed query')
+  })
+
   it('returns a generic 500 without leaking internals on unexpected failures', async () => {
     h.state.getDbError = new Error('select * from incidents -- secret sql')
     const response = await createIncidentRoute(post(validPayload))
@@ -233,6 +253,35 @@ describe('POST /api/incidents', () => {
 
   it('returns 409 when references keep colliding', async () => {
     h.state.insertErrors = Array.from({ length: 6 }, () => ({ code: '23505' }))
+    const response = await createIncidentRoute(post(validPayload))
+    expect(response.status).toBe(409)
+    const body = await response.json()
+    expect(body.error.code).toBe('CONFLICT')
+  })
+
+  it('retries a reference collision that drizzle wrapped on `cause`', async () => {
+    const wrappedUniqueViolation = () =>
+      Object.assign(new Error('Failed query: insert into "incidents" …'), {
+        query: 'insert into "incidents" …',
+        params: [],
+        cause: Object.assign(new Error('duplicate key value violates unique constraint "incidents_ref_key"'), {
+          code: '23505',
+        }),
+      })
+    h.state.insertErrors = [wrappedUniqueViolation()]
+    const response = await createIncidentRoute(post(validPayload))
+    expect(response.status).toBe(201)
+    expect(h.state.inserted).toHaveLength(1)
+  })
+
+  it('returns 409 when wrapped reference collisions never resolve', async () => {
+    h.state.insertErrors = Array.from({ length: 6 }, () =>
+      Object.assign(new Error('Failed query: insert into "incidents" …'), {
+        cause: Object.assign(new Error('duplicate key value violates unique constraint "incidents_ref_key"'), {
+          code: '23505',
+        }),
+      }),
+    )
     const response = await createIncidentRoute(post(validPayload))
     expect(response.status).toBe(409)
     const body = await response.json()
@@ -300,6 +349,17 @@ describe('GET /api/incidents', () => {
     expect(response.status).toBe(503)
     const body = await response.json()
     expect(body.error.code).toBe('DATABASE_NOT_CONFIGURED')
+  })
+
+  it('returns 503 when the driver error arrives wrapped on `cause`', async () => {
+    h.state.getDbError = Object.assign(new Error('Failed query: select …'), {
+      cause: Object.assign(new Error('connection terminated'), { code: 'ECONNRESET' }),
+    })
+    const response = await listIncidents(get(API))
+    expect(response.status).toBe(503)
+    const body = await response.json()
+    expect(body.error.code).toBe('DATABASE_UNAVAILABLE')
+    expect(body.error.message).not.toContain('Failed query')
   })
 })
 
