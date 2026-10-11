@@ -1,4 +1,10 @@
-export type IncidentSeverity = 'HIGH' | 'MED' | 'LOW'
+import type { IncidentSeverity } from '@/lib/incidents/constants'
+
+export {
+  SEVERITY_OPTIONS,
+  WASTE_CATEGORIES,
+  type IncidentSeverity,
+} from '@/lib/incidents/constants'
 
 export type IncidentColor = 'orange' | 'yellow' | 'red' | 'lime' | 'cobalt' | 'purple'
 
@@ -34,18 +40,6 @@ export interface DemoHotspot {
   risk: IncidentSeverity
   tone: IncidentColor
 }
-
-export const WASTE_CATEGORIES = [
-  'Mixed municipal waste',
-  'Organic waste',
-  'Plastic waste',
-  'Construction debris',
-  'Hazardous waste',
-  'E-waste',
-  'Other',
-] as const
-
-export const SEVERITY_OPTIONS: IncidentSeverity[] = ['HIGH', 'MED', 'LOW']
 
 export const DEMO_INCIDENTS: DemoIncident[] = [
   {

@@ -10,10 +10,16 @@ import {
   SEVERITY_OPTIONS,
   WASTE_CATEGORIES,
   decodeSegment,
-  findIncidentByRef,
-  type DemoIncident,
-  type IncidentSeverity,
 } from '@/lib/demo-data'
+import {
+  createIncident,
+  fetchIncident,
+  fetchIncidents,
+  type IncidentFailure,
+  type IncidentFailureKind,
+} from '@/lib/incidents/client'
+import type { IncidentDto } from '@/lib/incidents/types'
+import { INCIDENT_STATUSES, type IncidentSeverity, type IncidentStatus, type WasteCategory } from '@/lib/incidents/constants'
 
 const nav = [
   ['01', 'COMMAND CENTER', '/dashboard', Gauge],
@@ -214,7 +220,7 @@ function Sidebar({ active = '/dashboard' }: { active?: string }) {
         ))}
       </nav>
       <div className="system-status"><span className="pulse" /> SYSTEM OPERATIONAL / ONLINE</div>
-      <div className="sidebar-foot"><span>DEMO / SIMULATED DATA</span><span>v0.9.4 — CHENNAI GRID</span></div>
+      <div className="sidebar-foot"><span>REPORTS PERSISTED / ANALYTICS DEMO</span><span>v0.9.4 — CHENNAI GRID</span></div>
     </aside>
   )
 }
@@ -390,25 +396,152 @@ function SignalStream() {
   )
 }
 
+const STATUS_META: Record<IncidentStatus, { label: string; chip: string }> = {
+  reported: { label: 'REPORTED', chip: 'reported' },
+  triaged: { label: 'TRIAGED', chip: 'triaged' },
+  in_progress: { label: 'IN PROGRESS', chip: 'in_progress' },
+  resolved: { label: 'RESOLVED', chip: 'resolved' },
+}
+
+const SEVERITY_TONE: Record<IncidentSeverity, string> = {
+  HIGH: 'orange',
+  MED: 'yellow',
+  LOW: 'cobalt',
+}
+
+function formatWhen(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date
+    .toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    .toUpperCase()
+}
+
+function failureCopy(failure: IncidentFailure): { title: string; body: string } {
+  switch (failure.kind) {
+    case 'not_configured':
+      return {
+        title: 'DATABASE NOT CONFIGURED',
+        body: 'This server has no DATABASE_URL configured, so incidents cannot be saved or loaded yet. Copy .env.example to .env, set your PostgreSQL connection string, run `pnpm db:migrate`, and restart the server.',
+      }
+    case 'unavailable':
+      return {
+        title: 'DATABASE UNAVAILABLE',
+        body: 'The incident database is not responding. Nothing was loaded or saved — please retry in a moment.',
+      }
+    case 'not_found':
+      return { title: 'NOT FOUND', body: failure.message }
+    case 'server_error':
+      return { title: 'SERVER ERROR', body: failure.message }
+    default:
+      return { title: 'REQUEST REJECTED', body: failure.message }
+  }
+}
+
+function IncidentRowLink({ incident }: { incident: IncidentDto }) {
+  return (
+    <Link href={`/incidents/${incident.ref}`} className="incident-row">
+      <div className={`incident-icon ${SEVERITY_TONE[incident.severity]}`}><Crosshair /></div>
+      <div className="incident-main">
+        <strong>{incident.ref} / {incident.title}</strong>
+        <span>{incident.location} — {formatWhen(incident.createdAt)}</span>
+      </div>
+      <div className="incident-type">{incident.category}</div>
+      <div className={`severity ${incident.severity.toLowerCase()}`}>{incident.severity}</div>
+      <div className={`incident-status ${STATUS_META[incident.status].chip}`}>{STATUS_META[incident.status].label}</div>
+      <ChevronRight />
+    </Link>
+  )
+}
+
+function IncidentRowsSkeleton({ rows = 3 }: { rows?: number }) {
+  return (
+    <div aria-hidden="true">
+      {Array.from({ length: rows }).map((_, index) => (
+        <div className="skeleton-row" key={index}>
+          <span className="skeleton-bar skeleton-icon" />
+          <span className="skeleton-bar skeleton-main" />
+          <span className="skeleton-bar skeleton-short" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function IncidentListState({
+  failure,
+  onRetry,
+}: {
+  failure: IncidentFailure
+  onRetry?: () => void
+}) {
+  const copy = failureCopy(failure)
+  return (
+    <div className="list-state" role="alert">
+      <span className="demo-chip">PERSISTENCE / ERROR STATE</span>
+      <strong>{copy.title}</strong>
+      <p>{copy.body}</p>
+      {onRetry && (
+        <button type="button" className="button button-outline" onClick={onRetry}>
+          RETRY <RotateCcw />
+        </button>
+      )}
+    </div>
+  )
+}
+
 function IncidentQueue() {
+  const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [items, setItems] = useState<IncidentDto[]>([])
+  const [failure, setFailure] = useState<IncidentFailure | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setPhase('loading')
+    fetchIncidents({ limit: 5 }).then((result) => {
+      if (cancelled) return
+      if (result.ok) {
+        setItems(result.data.incidents)
+        setPhase('ready')
+      } else {
+        setFailure(result.failure)
+        setPhase('error')
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [reloadToken])
+
   return (
     <section className="panel incident-panel">
       <div className="panel-head">
-        <div><div className="eyebrow">PRIORITY QUEUE / DEMO FIXTURES</div><h2>Incidents requiring action</h2></div>
+        <div>
+          <div className="eyebrow">
+            {phase === 'ready' ? `PRIORITY QUEUE / ${items.length} PERSISTED RECORDS` : 'PRIORITY QUEUE / DATABASE RECORDS'}
+          </div>
+          <h2>Incidents requiring action</h2>
+        </div>
         <Link href="/incidents" className="panel-link">VIEW ALL <ArrowUpRight /></Link>
       </div>
-      <div className="incident-list">
-        {DEMO_INCIDENTS.map((incident) => (
-          <Link href={`/incidents/${incident.ref}`} className="incident-row" key={incident.id}>
-            <div className={`incident-icon ${incident.color}`}><Crosshair /></div>
-            <div className="incident-main"><strong>INCIDENT #{incident.id}</strong><span>{incident.place}</span></div>
-            <div className="incident-type">{incident.type}</div>
-            <div className={`severity ${incident.severity.toLowerCase()}`}>{incident.severity}</div>
-            <div className="confidence">{incident.confidence}<small>AI CONF.</small></div>
-            <ChevronRight />
-          </Link>
-        ))}
-      </div>
+      {phase === 'loading' && <IncidentRowsSkeleton rows={3} />}
+      {phase === 'error' && failure && (
+        <IncidentListState failure={failure} onRetry={() => setReloadToken((token) => token + 1)} />
+      )}
+      {phase === 'ready' && items.length === 0 && (
+        <div className="list-state">
+          <span className="demo-chip">PERSISTENCE / EMPTY</span>
+          <strong>NO REPORTS SAVED YET</strong>
+          <p>No incidents exist in the database. Submit the intake form to create the first persistent record.</p>
+          <Link href="/incidents/new" className="button button-lime"><Plus /> REPORT NEW INCIDENT</Link>
+        </div>
+      )}
+      {phase === 'ready' && items.length > 0 && (
+        <div className="incident-list">
+          {items.map((incident) => <IncidentRowLink key={incident.ref} incident={incident} />)}
+        </div>
+      )}
     </section>
   )
 }
@@ -601,46 +734,69 @@ function VisionModule() {
   )
 }
 
-function IncidentModule({ incident }: { incident: DemoIncident }) {
+const STATUS_TONE: Record<IncidentStatus, string> = {
+  reported: 'orange',
+  triaged: 'yellow',
+  in_progress: 'cobalt',
+  resolved: 'lime',
+}
+
+function IncidentRecordModule({ incident }: { incident: IncidentDto }) {
+  const statusMeta = STATUS_META[incident.status]
+  const coords =
+    incident.latitude !== null && incident.longitude !== null
+      ? `${incident.latitude.toFixed(4)}, ${incident.longitude.toFixed(4)}`
+      : null
+
   return (
     <div className="forensic">
       <section className="panel">
         <div className="panel-head">
-          <div><div className="eyebrow">FORENSIC WORKSPACE / DEMO FIXTURE</div><h2>INCIDENT #{incident.id}</h2></div>
+          <div><div className="eyebrow">FORENSIC WORKSPACE / PERSISTENT RECORD</div><h2>{incident.ref}</h2></div>
           <span className={`severity ${incident.severity.toLowerCase()}`}>SEVERITY: {incident.severity}</span>
         </div>
         <div className="forensic-grid">
           <div className="forensic-col evidence-col">
-            <span className="mono-label">01 / EVIDENCE IMAGE</span>
-            <EvidenceScene stamp={`CAPTURE ${incident.detected} / CAM-17`} />
-            <div className="evidence-meta"><span>SOURCE: FIELD CAPTURE</span><span>{incident.coords}</span></div>
+            <span className="mono-label">01 / LOCATION + EVIDENCE</span>
+            <div className="no-media">
+              <Crosshair />
+              <strong>{incident.location}</strong>
+              <p>{coords ? `COORDS ${coords}` : 'NO COORDINATES PROVIDED'}</p>
+            </div>
+            <div className="evidence-meta">
+              <span>SOURCE: CITIZEN REPORT</span>
+              <span>{formatWhen(incident.createdAt)}</span>
+            </div>
+            <p className="field-hint">No photo is attached to this record — image capture and storage arrive in a later phase.</p>
           </div>
           <div className="forensic-col detect-col">
-            <span className="mono-label">02 / AI DETECTION + CLASSIFICATION</span>
+            <span className="mono-label">02 / REPORTED DETAILS</span>
+            <div className="record-details">
+              <h3>{incident.title}</h3>
+              <p>{incident.description || 'No additional description was provided with this report.'}</p>
+            </div>
             <div className="det-list">
-              {incident.detections.map((line) => (
-                <div className="det-row" key={line.label}><span className={`det-swatch tone-${line.tone}`} /><strong>{line.label}</strong><span className="det-pct">{line.value}</span></div>
-              ))}
+              <div className="det-row"><span className={`det-swatch tone-${SEVERITY_TONE[incident.severity]}`} /><strong>{incident.category.toUpperCase()}</strong><span className="det-pct">{incident.severity}</span></div>
             </div>
             <div className="detect-note">
               <Sparkles />
-              <p>{incident.note}</p>
+              <p>AI classification does not run in this phase — category and severity are exactly what the reporter submitted.</p>
             </div>
           </div>
           <div className="forensic-col intel-col">
-            <span className="mono-label">03 / INCIDENT INTELLIGENCE</span>
+            <span className="mono-label">03 / INCIDENT RECORD</span>
             <div className="intel-list">
-              <div><span>INCIDENT</span><strong>#{incident.id}</strong></div>
               <div><span>REFERENCE</span><strong>{incident.ref}</strong></div>
+              <div><span>RECORD ID</span><strong>#{String(incident.id).padStart(5, '0')}</strong></div>
               <div><span>SEVERITY</span><strong className="tone-orange">{incident.severity}</strong></div>
-              <div><span>WASTE TYPE</span><strong>{incident.type.toUpperCase()}</strong></div>
-              <div><span>CONFIDENCE</span><strong>{incident.confidence}</strong></div>
-              <div><span>LOCATION</span><strong>{incident.zone}</strong></div>
-              <div><span>DETECTED</span><strong>{incident.detected}</strong></div>
-              <div><span>CREW</span><strong>{incident.crew}</strong></div>
-              <div><span>STATUS</span><strong className={`tone-${incident.statusTone}`}>{incident.status}</strong></div>
+              <div><span>CATEGORY</span><strong>{incident.category.toUpperCase()}</strong></div>
+              <div><span>STATUS</span><strong className={`tone-${STATUS_TONE[incident.status]}`}>{statusMeta.label}</strong></div>
+              <div><span>LOCATION</span><strong>{incident.location}</strong></div>
+              <div><span>REPORTED</span><strong>{formatWhen(incident.createdAt)}</strong></div>
+              <div><span>UPDATED</span><strong>{formatWhen(incident.updatedAt)}</strong></div>
+              <div><span>RESOLVED</span><strong>{incident.resolvedAt ? formatWhen(incident.resolvedAt) : '—'}</strong></div>
             </div>
-            <Link href="/verification" className="button button-block">OPEN VERIFICATION <ArrowUpRight /></Link>
+            <Link href="/incidents" className="button button-block">BACK TO INCIDENT QUEUE <ArrowUpRight /></Link>
           </div>
         </div>
       </section>
@@ -649,23 +805,21 @@ function IncidentModule({ incident }: { incident: DemoIncident }) {
   )
 }
 
-function IncidentNotFound({ incidentRef }: { incidentRef: string }) {
+function IncidentNotFound({ incidentRef, failure }: { incidentRef: string; failure: IncidentFailure | null }) {
+  const copy = failure ? failureCopy(failure) : null
   return (
     <section className="panel">
       <div className="panel-head">
-        <div><div className="eyebrow">LOOKUP FAILED / NO MATCHING FIXTURE</div><h2>Incident not found</h2></div>
-        <span className="demo-chip">DEMO FIXTURES ONLY</span>
+        <div><div className="eyebrow">LOOKUP FAILED / NO MATCHING RECORD</div><h2>Incident not found</h2></div>
+        <span className="demo-chip">DATABASE RECORDS ONLY</span>
       </div>
       <div className="notfound-body">
         <p>
-          No demo incident matches reference <strong>{incidentRef}</strong>. Incident reports are not persisted in
-          this build — only the bundled demo fixtures below exist until the database and API phase ships.
+          No incident exists with reference <strong>{incidentRef}</strong>. References are generated when a report is
+          saved and look like <strong>WX-1042</strong>. Demo fixtures are not served from this route — they are
+          development data only.
         </p>
-        <ul className="notfound-refs">
-          {DEMO_INCIDENTS.map((incident) => (
-            <li key={incident.ref}><Link href={`/incidents/${incident.ref}`}>{incident.ref} / #{incident.id}</Link></li>
-          ))}
-        </ul>
+        {copy && <p>{copy.body}</p>}
         <div className="boundary-actions">
           <Link href="/incidents" className="button button-outline">BROWSE INCIDENT QUEUE <ArrowUpRight /></Link>
           <Link href="/incidents/new" className="button button-lime"><Plus /> REPORT NEW INCIDENT</Link>
@@ -676,34 +830,118 @@ function IncidentNotFound({ incidentRef }: { incidentRef: string }) {
 }
 
 function IncidentListPage() {
+  const limit = 12
+  const [status, setStatus] = useState<IncidentStatus | ''>('')
+  const [items, setItems] = useState<IncidentDto[]>([])
+  const [total, setTotal] = useState(0)
+  const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [failure, setFailure] = useState<IncidentFailure | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [moreFailure, setMoreFailure] = useState<IncidentFailure | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setPhase('loading')
+    setMoreFailure(null)
+    fetchIncidents({ limit, offset: 0, status: status || undefined }).then((result) => {
+      if (cancelled) return
+      if (result.ok) {
+        setItems(result.data.incidents)
+        setTotal(result.data.meta.total)
+        setPhase('ready')
+      } else {
+        setFailure(result.failure)
+        setPhase('error')
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [status, reloadToken])
+
+  const loadMore = async () => {
+    setLoadingMore(true)
+    setMoreFailure(null)
+    const result = await fetchIncidents({ limit, offset: items.length, status: status || undefined })
+    if (result.ok) {
+      setItems((current) => [...current, ...result.data.incidents])
+      setTotal(result.data.meta.total)
+    } else {
+      setMoreFailure(result.failure)
+    }
+    setLoadingMore(false)
+  }
+
   return (
-    <Shell active="/incidents" title="Incident intelligence" eyebrow="INVESTIGATION / DEMO QUEUE">
+    <Shell active="/incidents" title="Incident intelligence" eyebrow="INVESTIGATION / PERSISTENT RECORDS">
       <div className="workspace-wrap">
         <div className="workspace-hero tone-orange">
           <div>
-            <span className="signal-line"><span className="pulse" /> INVESTIGATION / DEMO QUEUE</span>
+            <span className="signal-line"><span className="pulse" /> INVESTIGATION / POSTGRESQL RECORDS</span>
             <h2>Incident register</h2>
-            <p>Every signal becomes a traceable operational decision. Incident rows open the full forensic workspace for that reference.</p>
+            <p>Every report submitted through WASTEX is stored in PostgreSQL and served by the incidents API. Rows open the full record for that reference.</p>
           </div>
-          <div className="workspace-code">WX/INCIDENTS<br />LIVE / 13.0827° N<br />AI CORE / 07</div>
+          <div className="workspace-code">WX/INCIDENTS<br />POSTGRES / LIVE<br />API / V1</div>
         </div>
         <section className="panel incident-panel">
           <div className="panel-head">
-            <div><div className="eyebrow">DEMO FIXTURES / {DEMO_INCIDENTS.length} INCIDENTS</div><h2>All incidents</h2></div>
-            <Link href="/incidents/new" className="button button-lime"><Plus /> NEW INCIDENT</Link>
+            <div>
+              <div className="eyebrow">
+                {phase === 'ready' ? `${total} RECORDS / SHOWING ${items.length}` : 'DATABASE RECORDS / LOADING'}
+              </div>
+              <h2>All incidents</h2>
+            </div>
+            <div className="panel-head-actions">
+              <label className="list-filter">
+                <span>STATUS</span>
+                <select
+                  value={status}
+                  onChange={(event) => setStatus(event.target.value as IncidentStatus | '')}
+                  aria-label="Filter incidents by status"
+                >
+                  <option value="">ALL STATUSES</option>
+                  {INCIDENT_STATUSES.map((option) => (
+                    <option key={option} value={option}>{STATUS_META[option].label}</option>
+                  ))}
+                </select>
+              </label>
+              <Link href="/incidents/new" className="button button-lime"><Plus /> NEW INCIDENT</Link>
+            </div>
           </div>
-          <div className="incident-list">
-            {DEMO_INCIDENTS.map((incident) => (
-              <Link href={`/incidents/${incident.ref}`} className="incident-row" key={incident.id}>
-                <div className={`incident-icon ${incident.color}`}><Crosshair /></div>
-                <div className="incident-main"><strong>INCIDENT #{incident.id} / {incident.ref}</strong><span>{incident.place} — {incident.detected}</span></div>
-                <div className="incident-type">{incident.type}</div>
-                <div className={`severity ${incident.severity.toLowerCase()}`}>{incident.severity}</div>
-                <div className="confidence">{incident.confidence}<small>AI CONF.</small></div>
-                <ChevronRight />
-              </Link>
-            ))}
-          </div>
+
+          {phase === 'loading' && <IncidentRowsSkeleton rows={4} />}
+          {phase === 'error' && failure && (
+            <IncidentListState failure={failure} onRetry={() => setReloadToken((token) => token + 1)} />
+          )}
+          {phase === 'ready' && items.length === 0 && (
+            <div className="list-state">
+              <span className="demo-chip">PERSISTENCE / EMPTY RESULT</span>
+              <strong>NO INCIDENTS MATCH THIS VIEW</strong>
+              <p>
+                {status
+                  ? `No stored incident currently has the status "${STATUS_META[status].label}".`
+                  : 'The database contains no incident reports yet.'}
+              </p>
+              <Link href="/incidents/new" className="button button-lime"><Plus /> REPORT NEW INCIDENT</Link>
+            </div>
+          )}
+          {phase === 'ready' && items.length > 0 && (
+            <>
+              <div className="incident-list">
+                {items.map((incident) => <IncidentRowLink key={incident.ref} incident={incident} />)}
+              </div>
+              <div className="list-foot">
+                <span className="mono-label">SHOWING {items.length} OF {total}</span>
+                {items.length < total && (
+                  <button type="button" className="button button-outline" onClick={loadMore} disabled={loadingMore}>
+                    {loadingMore ? 'LOADING…' : 'LOAD MORE'} <RotateCcw />
+                  </button>
+                )}
+              </div>
+              {moreFailure && <IncidentListState failure={moreFailure} onRetry={loadMore} />}
+            </>
+          )}
         </section>
         <SignalStream />
       </div>
@@ -712,27 +950,83 @@ function IncidentListPage() {
 }
 
 function IncidentDetailPage({ incidentRef }: { incidentRef: string }) {
-  const incident = findIncidentByRef(incidentRef)
+  const [phase, setPhase] = useState<'loading' | 'ready' | 'not_found' | 'error'>('loading')
+  const [incident, setIncident] = useState<IncidentDto | null>(null)
+  const [failure, setFailure] = useState<IncidentFailure | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setPhase('loading')
+    fetchIncident(incidentRef).then((result) => {
+      if (cancelled) return
+      if (result.ok) {
+        setIncident(result.data.incident)
+        setFailure(null)
+        setPhase('ready')
+        return
+      }
+      setFailure(result.failure)
+      setPhase(result.failure.kind === 'not_found' ? 'not_found' : 'error')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [incidentRef, reloadToken])
+
+  const resolved = phase === 'ready' && incident
+  const eyebrow = resolved
+    ? 'INVESTIGATION / PERSISTENT RECORD'
+    : phase === 'not_found'
+      ? 'INVESTIGATION / REFERENCE NOT FOUND'
+      : phase === 'error'
+        ? 'INVESTIGATION / DATABASE ERROR'
+        : 'INVESTIGATION / LOADING RECORD'
+
   return (
-    <Shell
-      active="/incidents"
-      title={incident ? `Incident ${incident.ref}` : 'Incident lookup'}
-      eyebrow={incident ? `INVESTIGATION / ${incident.zone}` : 'INVESTIGATION / REFERENCE NOT FOUND'}
-    >
+    <Shell active="/incidents" title={resolved ? `Incident ${incident.ref}` : 'Incident lookup'} eyebrow={eyebrow}>
       <div className="workspace-wrap">
-        <div className={`workspace-hero tone-${incident ? incident.color : 'yellow'}`}>
+        <div className={`workspace-hero tone-${resolved ? SEVERITY_TONE[incident.severity] : 'yellow'}`}>
           <div>
-            <span className="signal-line"><span className="pulse" /> {incident ? 'FORENSIC WORKSPACE / DEMO FIXTURE' : 'LOOKUP FAILED / DEMO FIXTURES ONLY'}</span>
-            <h2>{incident ? incident.place : `Unknown / ${incidentRef}`}</h2>
+            <span className="signal-line">
+              <span className="pulse" /> {resolved ? 'FORENSIC WORKSPACE / DATABASE RECORD' : eyebrow}
+            </span>
+            <h2>{resolved ? incident.title : `Unknown / ${incidentRef}`}</h2>
             <p>
-              {incident
-                ? `${incident.type} detected at ${incident.detected}. Demo fixture data — not a live municipal record.`
-                : 'This reference does not match any bundled demo incident. Reports are not persisted yet.'}
+              {resolved
+                ? `${incident.category} reported at ${incident.location} — saved to PostgreSQL on ${formatWhen(incident.createdAt)}.`
+                : phase === 'loading'
+                  ? `Fetching reference ${incidentRef} from the incidents API…`
+                  : 'This reference does not match any stored incident report.'}
             </p>
           </div>
-          <div className="workspace-code">{incident ? `WX/${incident.ref}` : 'WX/404'}<br />{incident ? incident.zone : 'NO MATCH'}<br />{incident ? incident.severity : '—'}</div>
+          <div className="workspace-code">
+            {resolved ? `WX/${incident.ref}` : phase === 'loading' ? 'WX/…' : 'WX/404'}
+            <br />{resolved ? incident.status.replace('_', ' ').toUpperCase() : 'NO MATCH'}
+            <br />{resolved ? incident.severity : '—'}
+          </div>
         </div>
-        {incident ? <IncidentModule incident={incident} /> : <IncidentNotFound incidentRef={incidentRef} />}
+
+        {phase === 'loading' && (
+          <section className="panel">
+            <div className="panel-head">
+              <div><div className="eyebrow">DATABASE READ / IN PROGRESS</div><h2>Loading {incidentRef}</h2></div>
+              <span className="live-tag"><span className="pulse" /> FETCHING</span>
+            </div>
+            <IncidentRowsSkeleton rows={2} />
+          </section>
+        )}
+        {phase === 'not_found' && <IncidentNotFound incidentRef={incidentRef} failure={failure} />}
+        {phase === 'error' && failure && (
+          <section className="panel">
+            <div className="panel-head">
+              <div><div className="eyebrow">DATABASE READ / FAILED</div><h2>Record unavailable</h2></div>
+              <span className="demo-chip">PERSISTENCE / ERROR STATE</span>
+            </div>
+            <IncidentListState failure={failure} onRetry={() => setReloadToken((token) => token + 1)} />
+          </section>
+        )}
+        {phase === 'ready' && incident && <IncidentRecordModule incident={incident} />}
       </div>
     </Shell>
   )
@@ -753,10 +1047,14 @@ const EMPTY_INTAKE: IntakeValues = { title: '', category: '', severity: '', loca
 
 function validateIntake(values: IntakeValues): IntakeErrors {
   const errors: IntakeErrors = {}
-  if (values.title.trim().length < 8) errors.title = 'Enter a short description of at least 8 characters.'
+  const title = values.title.trim()
+  if (title.length < 8) errors.title = 'Enter a short description of at least 8 characters.'
+  else if (title.length > 160) errors.title = 'Title must be 160 characters or fewer.'
   if (!values.category) errors.category = 'Select a waste category.'
   if (!values.severity) errors.severity = 'Select a severity level.'
-  if (values.location.trim().length < 3) errors.location = 'Enter a location or address.'
+  const location = values.location.trim()
+  if (location.length < 3) errors.location = 'Enter a location or address.'
+  else if (location.length > 300) errors.location = 'Location must be 300 characters or fewer.'
   const lat = values.latitude.trim()
   const lng = values.longitude.trim()
   if (lat !== '') {
@@ -767,39 +1065,79 @@ function validateIntake(values: IntakeValues): IntakeErrors {
     const parsed = Number(lng)
     if (!Number.isFinite(parsed) || parsed < -180 || parsed > 180) errors.longitude = 'Longitude must be a number between −180 and 180.'
   }
+  if (!errors.latitude && !errors.longitude && (lat === '') !== (lng === '')) {
+    if (lat === '') errors.latitude = 'Latitude and longitude must be provided together.'
+    else errors.longitude = 'Latitude and longitude must be provided together.'
+  }
   return errors
 }
 
 function IncidentIntakeForm() {
   const [values, setValues] = useState<IntakeValues>(EMPTY_INTAKE)
   const [errors, setErrors] = useState<IntakeErrors>({})
-  const [status, setStatus] = useState<'editing' | 'validated'>('editing')
+  const [submitState, setSubmitState] = useState<'editing' | 'saving' | 'saved' | 'error'>('editing')
+  const [saved, setSaved] = useState<IncidentDto | null>(null)
+  const [failure, setFailure] = useState<IncidentFailure | null>(null)
   const [fileNames, setFileNames] = useState<string[]>([])
   const [attempted, setAttempted] = useState(false)
   const statusRef = useRef<HTMLDivElement>(null)
 
   const errorCount = Object.keys(errors).length
 
+  const focusStatus = () => window.requestAnimationFrame(() => statusRef.current?.focus())
+
   const update = (key: keyof IntakeValues, value: string) => {
     setValues((current) => ({ ...current, [key]: value }))
     if (attempted) {
       setErrors(validateIntake({ ...values, [key]: value }))
     }
-    setStatus('editing')
+    if (submitState !== 'saving') setSubmitState('editing')
   }
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const nextErrors = validateIntake(values)
     setAttempted(true)
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length > 0) {
-      setStatus('editing')
-      window.requestAnimationFrame(() => statusRef.current?.focus())
+      setSubmitState('editing')
+      focusStatus()
       return
     }
-    setStatus('validated')
-    window.requestAnimationFrame(() => statusRef.current?.focus())
+
+    setSubmitState('saving')
+    setFailure(null)
+
+    const result = await createIncident({
+      title: values.title.trim(),
+      category: values.category as WasteCategory,
+      severity: values.severity as IncidentSeverity,
+      location: values.location.trim(),
+      latitude: values.latitude.trim() === '' ? null : Number(values.latitude),
+      longitude: values.longitude.trim() === '' ? null : Number(values.longitude),
+    })
+
+    if (result.ok) {
+      setSaved(result.data.incident)
+      setSubmitState('saved')
+      focusStatus()
+      return
+    }
+
+    setFailure(result.failure)
+    if (result.failure.details && result.failure.details.length > 0) {
+      setErrors((current) => {
+        const merged: IntakeErrors = { ...current }
+        for (const detail of result.failure.details!) {
+          if (detail.field in EMPTY_INTAKE) {
+            merged[detail.field as keyof IntakeValues] = detail.message
+          }
+        }
+        return merged
+      })
+    }
+    setSubmitState('error')
+    focusStatus()
   }
 
   const handleReset = () => {
@@ -807,35 +1145,72 @@ function IncidentIntakeForm() {
     setErrors({})
     setFileNames([])
     setAttempted(false)
-    setStatus('editing')
+    setSaved(null)
+    setFailure(null)
+    setSubmitState('editing')
   }
+
+  const failureCopyText = failure ? failureCopy(failure) : null
 
   return (
     <form className="intake-form" onSubmit={handleSubmit} noValidate aria-labelledby="intake-title">
-      {status === 'editing' && attempted && errorCount > 0 && (
+      {attempted && errorCount > 0 && submitState === 'editing' && (
         <div className="form-alert" role="alert" tabIndex={-1} ref={statusRef}>
           <AlertTriangle />
           FORM NOT SUBMITTED — {errorCount} {errorCount === 1 ? 'FIELD NEEDS' : 'FIELDS NEED'} ATTENTION.
         </div>
       )}
-      {status === 'validated' && (
+
+      {submitState === 'saving' && (
         <div className="form-notice" role="status" tabIndex={-1} ref={statusRef}>
-          <strong>FORM VALID — NOT YET SAVED</strong>
+          <strong>SAVING REPORT…</strong>
+          <p>Sending this report to POST /api/incidents. Keep this page open until the save completes.</p>
+        </div>
+      )}
+
+      {submitState === 'error' && failure && failureCopyText && (
+        <div className="form-alert form-alert-stack" role="alert" tabIndex={-1} ref={statusRef}>
+          <AlertTriangle />
+          <div>
+            <strong>{failureCopyText.title}</strong>
+            <p>{failureCopyText.body}</p>
+            {failure.details && failure.details.length > 0 && (
+              <ul>
+                {failure.details.map((detail) => (
+                  <li key={`${detail.field}-${detail.message}`}>{detail.field}: {detail.message}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
+      {submitState === 'saved' && saved && (
+        <div className="form-notice form-success" role="status" tabIndex={-1} ref={statusRef}>
+          <strong>REPORT SAVED — {saved.ref}</strong>
           <p>
-            This report has <b>not</b> been stored. WASTEX has no database or API yet, so nothing was transmitted or
-            saved. Persistence and submission ship in the next phase; your entries exist only in this browser session.
+            This incident was written to PostgreSQL and will still be there after a refresh. It is now served by the
+            incidents API like any other stored record.
           </p>
           <dl>
-            <dt>TITLE</dt><dd>{values.title}</dd>
-            <dt>CATEGORY</dt><dd>{values.category}</dd>
-            <dt>SEVERITY</dt><dd>{values.severity}</dd>
-            <dt>LOCATION</dt><dd>{values.location}</dd>
-            {(values.latitude || values.longitude) && (<><dt>COORDS</dt><dd>{[values.latitude, values.longitude].filter(Boolean).join(' / ')}</dd></>)}
-            {fileNames.length > 0 && (<><dt>PHOTOS</dt><dd>{fileNames.length} file(s) held in browser</dd></>)}
+            <dt>REFERENCE</dt><dd>{saved.ref}</dd>
+            <dt>TITLE</dt><dd>{saved.title}</dd>
+            <dt>CATEGORY</dt><dd>{saved.category}</dd>
+            <dt>SEVERITY</dt><dd>{saved.severity}</dd>
+            <dt>STATUS</dt><dd>{STATUS_META[saved.status].label}</dd>
+            <dt>LOCATION</dt><dd>{saved.location}</dd>
+            {(saved.latitude !== null && saved.longitude !== null) && (
+              <><dt>COORDS</dt><dd>{saved.latitude}, {saved.longitude}</dd></>
+            )}
+            <dt>SAVED</dt><dd>{formatWhen(saved.createdAt)}</dd>
+            {fileNames.length > 0 && (<><dt>PHOTOS</dt><dd>{fileNames.length} file(s) held in browser only — not uploaded</dd></>)}
           </dl>
-          <button type="button" className="button" onClick={() => { setStatus('editing'); window.requestAnimationFrame(() => statusRef.current?.focus()) }}>
-            KEEP EDITING <ArrowUpRight />
-          </button>
+          <div className="boundary-actions">
+            <Link href={`/incidents/${saved.ref}`} className="button button-lime">VIEW SAVED INCIDENT <ArrowUpRight /></Link>
+            <button type="button" className="button button-outline" onClick={handleReset}>
+              REPORT ANOTHER <RotateCcw />
+            </button>
+          </div>
         </div>
       )}
 
@@ -973,13 +1348,17 @@ function IncidentIntakeForm() {
       </div>
 
       <div className="form-actions">
-        <button type="submit" className="button button-lime" disabled={status === 'validated'}>
-          {status === 'validated' ? 'SUBMISSION LOCKED' : 'SUBMIT REPORT'} <ArrowUpRight />
+        <button
+          type="submit"
+          className="button button-lime"
+          disabled={submitState === 'saving' || submitState === 'saved'}
+        >
+          {submitState === 'saving' ? 'SAVING REPORT…' : submitState === 'saved' ? 'REPORT SAVED' : submitState === 'error' ? 'RETRY SUBMIT' : 'SUBMIT REPORT'} <ArrowUpRight />
         </button>
-        <button type="button" className="button button-outline" onClick={handleReset}>
+        <button type="button" className="button button-outline" onClick={handleReset} disabled={submitState === 'saving'}>
           RESET FORM <RotateCcw />
         </button>
-        <span className="demo-chip">NO DATA IS SENT — API PHASE PENDING</span>
+        <span className="demo-chip">SAVED VIA POST /api/incidents → POSTGRESQL</span>
       </div>
     </form>
   )
@@ -993,9 +1372,9 @@ function IncidentIntakePage() {
           <div>
             <span className="signal-line"><span className="pulse" /> INTAKE / NEW SIGNAL</span>
             <h2>Report incident</h2>
-            <p>Capture a street-level waste signal. The form validates locally and previews your report — saving is enabled once the persistence phase ships.</p>
+            <p>Capture a street-level waste signal. Valid reports are validated by the API and saved to PostgreSQL, where they appear in the incident register.</p>
           </div>
-          <div className="workspace-code">WX/INTAKE<br />LOCAL VALIDATION<br />API / PENDING</div>
+          <div className="workspace-code">WX/INTAKE<br />ZOD + DRIZZLE<br />API / V1</div>
         </div>
         <IncidentIntakeForm />
       </div>
